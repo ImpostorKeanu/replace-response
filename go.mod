@@ -1,4 +1,4 @@
-module github.com/impostorkeanu/replace-response-placeholder
+module github.com/impostorkeanu/replace-response-placeholders
 
 go 1.18
 
