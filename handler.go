@@ -51,13 +51,16 @@ type Handler struct {
 	// can break HTTP/2 streams.
 	Stream bool `json:"stream,omitempty"`
 
-	transformerPool *sync.Pool
+	// withPlaceholders is a slice of Replacement values that
+	// are updated with the current request's placeholder contexts.
+	withPlaceholders []*Replacement
+	transformerPool  *sync.Pool
 }
 
 // CaddyModule returns the Caddy module information.
 func (Handler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.replace_response",
+		ID:  "http.handlers.replace_response_placeholders",
 		New: func() caddy.Module { return new(Handler) },
 	}
 }
@@ -89,8 +92,15 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 	h.transformerPool = &sync.Pool{
 		New: func() interface{} {
-			transforms := make([]transform.Transformer, len(h.Replacements))
-			for i, repl := range h.Replacements {
+			var transforms []transform.Transformer
+			for _, repl := range h.Replacements {
+
+				// Capture and skip any values expected to have placeholders.
+				if repl.Placeholder {
+					h.withPlaceholders = append(h.withPlaceholders, repl)
+					continue
+				}
+
 				finalReplace := placeholderRepl.ReplaceKnown(repl.Replace, "")
 
 				if repl.re != nil {
@@ -98,10 +108,10 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 					// See: https://github.com/icholy/replace/issues/5#issuecomment-949757616
 					tr.MaxMatchSize = 2048
-					transforms[i] = tr
+					transforms = append(transforms, tr)
 				} else {
 					finalSearch := placeholderRepl.ReplaceKnown(repl.Search, "")
-					transforms[i] = replace.String(finalSearch, finalReplace)
+					transforms = append(transforms, replace.String(finalSearch, finalReplace))
 				}
 			}
 			return transform.Chain(transforms...)
@@ -154,8 +164,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return nil // should never happen, but whatever
 	}
 
+	result := rec.Buffer().Bytes()
+
+	// apply replacements with request placeholders
+	if len(h.withPlaceholders) > 0 {
+		rRepl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+		transforms := make([]transform.Transformer, len(h.withPlaceholders))
+		for i, repl := range h.withPlaceholders {
+			finalReplace := rRepl.ReplaceAll(repl.Replace, "")
+			if repl.SearchRegexp != "" {
+				// apply replacements to current regex, then compile
+				finalSearch := rRepl.ReplaceAll(repl.SearchRegexp, "")
+				re, err := regexp.Compile(finalSearch)
+				if err != nil {
+					return err
+				}
+				t := replace.RegexpString(re, finalReplace)
+				t.MaxMatchSize = 2048
+				transforms[i] = t
+			} else {
+				finalSearch := rRepl.ReplaceAll(repl.Search, "")
+				transforms[i] = replace.String(finalSearch, finalReplace)
+			}
+		}
+		result, _, err = transform.Bytes(transform.Chain(transforms...), result)
+	}
+
 	// TODO: could potentially use transform.Append here with a pooled byte slice as buffer?
-	result, _, err := transform.Bytes(tr, rec.Buffer().Bytes())
+	result, _, err = transform.Bytes(tr, result)
 	if err != nil {
 		return err
 	}
@@ -184,6 +220,13 @@ type Replacement struct {
 
 	// The replacement string/value. Required.
 	Replace string `json:"replace"`
+
+	// Placeholder determines if Search or SearchRegexp contains a placeholder
+	// value. If so, the value is updated with Caddy placeholders.
+	//
+	// Note that this is significantly less efficient because additional
+	// processing on the replacements must occur during each replacement.
+	Placeholder bool `json:"placeholder"`
 
 	re *regexp.Regexp
 }

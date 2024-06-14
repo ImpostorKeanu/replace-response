@@ -1,3 +1,30 @@
+This is a fork of Caddy's [replace_response](https://github.com/caddyserver/replace-response/blob/master/handler.go) module that supports runtime
+placeholder values. It's significantly less efficient than the original.
+
+# Note
+
+Replacement configurations that use runtime placeholders *must* have the
+`placeholder` field set to `true`. This allows us to maintain a semblance
+of the efficiency achieved by the original module.
+
+# Example with placeholder
+
+This example replaces the string `foo` with the method of the current HTTP
+request.
+
+```json
+{
+  "handler": "replace_response_placeholder",
+  "replacements": [
+    {
+      "search": "foo",
+      "replace": "{http.request.method}",
+      "placeholder": true
+    }
+  ]
+}
+```
+
 Caddy `replace_response` handler module
 =======================================
 
